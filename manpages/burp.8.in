@@ -256,6 +256,12 @@ Allows access for the specified network or address. For example: '::1' or '127.0
 \fBnetwork_allow_status=[string]\fR
 Allows access for the specified network or address to the status server. For example: '::1' or '127.0.0.1/8'. Specify multiple 'network_allow' entries on separate lines to allow multiple networks or addresses. If this option is not given, all networks are allowed. This option can be overridden by the client configuration files in clientconfdir on the server.
 .TP
+\fBlisten_prometheus_exporter=[address]:[port]\fR
+Defines the main TCP address and port that the server listens on for Prometheus metrics requests. Specify multiple 'listen_prometheus_exporter' entries on separate lines in order to listen on multiple addresses and ports. Comment out to have no prometheus exporter server.
+.TP
+\fBprometheus_exporter_target=[target]\fR
+Defines the explicit prometheus_exporter_target. Comment out if you want to get a reply from any target.
+.TP
 \fBcname_lowercase=[0|1]\fR
 Whether to force lowercase cname when looking-up in clientconfdir. This also affects the fqdn lookup on the client (see client configuration options for details). The default is 0. When set to 1 the name provided by the client while authenticating will be lowercased.
 .TP
@@ -952,6 +958,10 @@ Sending signal 1 (HUP) to the main server process will cause it to reload. For t
 4: could not connect to server
 .br
 5: max parallel backups reached
+.br
+6: another instance is already running
+.br
+7: finalising previous backup
 
 .SH BUGS
 If you find bugs, please report them to the email list. See the website

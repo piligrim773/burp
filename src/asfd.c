@@ -135,6 +135,15 @@ static int parse_readbuf_standard(struct asfd *asfd)
 	return 0;
 }
 
+static int parse_readbuf_http(struct asfd *asfd)
+{
+	if(!asfd->readbuflen) return 0;
+	// wait for start-line
+	if(!memchr(asfd->readbuf,'\r',asfd->readbuflen)) return 0;
+	if(extract_buf(asfd, asfd->readbuflen, 0)) return -1;
+	return 0;
+}
+
 static int asfd_parse_readbuf(struct asfd *asfd)
 {
 	if(asfd->rbuf->buf) return 0;
@@ -380,6 +389,15 @@ static int append_to_write_buffer(struct asfd *asfd,
 	return 0;
 }
 
+static int move_to_write_buffer(struct asfd *asfd,struct iobuf *wbuf)
+{
+	free_w(&asfd->writebuf);
+	asfd->writebuf=wbuf->buf;
+	asfd->writebuflen=wbuf->len;
+	iobuf_init(wbuf);
+	return 0;
+}
+
 static enum append_ret asfd_append_all_to_write_buffer(struct asfd *asfd,
 	struct iobuf *wbuf)
 {
@@ -402,6 +420,9 @@ static enum append_ret asfd_append_all_to_write_buffer(struct asfd *asfd,
 			if(asfd->writebuflen+wbuf->len>=asfd->bufmaxsize-1)
 				return APPEND_BLOCKED;
 			break;
+		case ASFD_STREAM_HTTP:
+			move_to_write_buffer(asfd,wbuf);
+			return APPEND_OK;
 		case ASFD_STREAM_NCURSES_STDIN:
 		default:
 			logp("%s: unknown asfd stream type in %s: %d\n",
@@ -518,7 +539,8 @@ int asfd_simple_loop(struct asfd *asfd,
 		iobuf_free_content(rbuf);
 		if(asfd->read(asfd)) goto error;
 		if(!rbuf->buf) continue;
-		if(rbuf->cmd!=CMD_GEN)
+		if(rbuf->cmd!=CMD_GEN
+		  && rbuf->cmd!=CMD_ERROR)
 		{
 			if(rbuf->cmd==CMD_WARNING
 			  || rbuf->cmd==CMD_MESSAGE)
@@ -628,6 +650,9 @@ static int asfd_init(struct asfd *asfd, const char *desc,
 			asfd->parse_readbuf_specific=parse_readbuf_ncurses;
 			break;
 #endif
+		case ASFD_STREAM_HTTP:
+			asfd->parse_readbuf_specific=parse_readbuf_http;
+			break;
 		default:
 			logp("%s: unknown asfd stream type in %s: %d\n",
 				desc, __func__, asfd->streamtype);
@@ -757,6 +782,28 @@ struct asfd *setup_asfd_linebuf_write(struct async *as,
 	struct asfd *asfd;
 	if((asfd=setup_asfd_linebuf(as, desc, fd)))
 		asfd->attempt_reads=0;
+	return asfd;
+}
+
+struct asfd *setup_asfd_http(struct async *as,
+	const char *desc, int *fd, const char *listen)
+{
+	struct asfd *asfd;
+
+	if((asfd=do_setup_asfd(as, desc, fd, listen,
+	  /*ssl*/NULL, ASFD_STREAM_HTTP)))
+		asfd->attempt_reads=1;
+	return asfd;
+}
+
+struct asfd *setup_asfd_http_client(struct async *as,
+	const char *desc, int *fd)
+{
+	struct asfd *asfd;
+
+	if((asfd=do_setup_asfd(as, desc, fd, "",
+	  /*ssl*/NULL, ASFD_STREAM_HTTP)))
+		asfd->set_timeout(asfd, 1);
 	return asfd;
 }
 

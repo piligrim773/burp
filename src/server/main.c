@@ -16,6 +16,7 @@
 #include "child.h"
 #include "main.h"
 #include "run_action.h"
+#include "prometheus_exporter.h"
 #include "monitor/status_server.h"
 
 #ifdef HAVE_SYSTEMD
@@ -65,8 +66,8 @@ static void chld_check_for_exiting(struct async *mainas)
 		for(asfd=mainas->asfd; asfd; asfd=asfd->next)
 		{
 			if(p!=asfd->pid) continue;
-			mainas->asfd_remove(mainas, asfd);
-			asfd_free(&asfd);
+			// wait for last cntr from child
+			asfd->want_to_remove=1;
 			break;
 		}
 	}
@@ -150,6 +151,7 @@ static int init_listen_socket(struct strlist *address,
 			address->path, strerror(errno));
 		goto error;
 	}
+	set_tcp_defer_accept(fd, 1);
 	set_keepalive(fd, 1);
 #ifdef HAVE_IPV6
 	if(info->ai_family==AF_INET6)
@@ -178,7 +180,12 @@ static int init_listen_socket(struct strlist *address,
 	}
 
 	log_listen_socket(desc, info, port, address->flag);
-	if(!(newfd=setup_asfd(mainas, desc, &fd, address->path)))
+
+	newfd=(fdtype!=ASFD_FD_SERVER_LISTEN_PROMETHEUS_EXPORTER)
+		?setup_asfd(mainas, desc, &fd, address->path)
+		:setup_asfd_http(mainas, desc, &fd, address->path);
+
+	if(!newfd)
 		goto end;
 #ifdef USE_IPACL
 	for(struct strlist *l=ipacl; l; l=l->next)
@@ -565,6 +572,13 @@ static int process_incoming_client(struct asfd *asfd, SSL_CTX *ctx,
 #endif
         logp("Connect from peer: %s:%d\n", peer_addr, peer_port);
 
+	if(fdtype==ASFD_FD_SERVER_LISTEN_PROMETHEUS_EXPORTER)
+	{
+		setup_asfd_http_client(asfd->as, "prometheus exporter client", &cfd);
+		close_fd(&cfd);
+		return 0;
+	}
+
 	if(!forking)
 		return run_child(&cfd, ctx,
 			&client_name, -1, -1, conffile, forking, peer_addr);
@@ -877,7 +891,8 @@ end:
 static int socket_activated_init_listen_sockets(
 	struct async *mainas,
 	struct strlist *addresses,
-	struct strlist *addresses_status
+	struct strlist *addresses_status,
+	struct strlist *addresses_prometheus_exporter
 ) {
 	int n=0;
 
@@ -914,6 +929,12 @@ static int socket_activated_init_listen_sockets(
 			desc="server status by socket activation";
 			fdtype=ASFD_FD_SERVER_LISTEN_STATUS;
 		}
+		else if(!check_addr_for_desc(addresses_prometheus_exporter,
+			fdnum, &addr))
+		{
+			desc="prometheus exporter by socket activation";
+			fdtype=ASFD_FD_SERVER_LISTEN_PROMETHEUS_EXPORTER;
+		}
 		else
 		{
 			logp("Strange socket activation fd: %d\n", fdnum);
@@ -946,6 +967,7 @@ static int run_server(struct conf **confs, const char *conffile)
 	struct async *mainas=NULL;
 	struct strlist *addresses=get_strlist(confs[OPT_LISTEN]);
 	struct strlist *addresses_status=get_strlist(confs[OPT_LISTEN_STATUS]);
+	struct strlist *addresses_prometheus_exporter=get_strlist(confs[OPT_LISTEN_PROMETHEUS_EXPORTER]);
 	int max_parallel_backups=get_int(confs[OPT_MAX_PARALLEL_BACKUPS]);
 	struct strlist *network_allow=get_strlist(confs[OPT_NETWORK_ALLOW]);
 	struct strlist *network_allow_status=get_strlist(confs[OPT_NETWORK_ALLOW_STATUS]);
@@ -967,7 +989,7 @@ static int run_server(struct conf **confs, const char *conffile)
 
 #ifdef HAVE_SYSTEMD
 	if(socket_activated_init_listen_sockets(mainas,
-		addresses, addresses_status)==-1)
+		addresses, addresses_status, addresses_prometheus_exporter)==-1)
 			goto end;
 #endif
 	if(!mainas->asfd)
@@ -975,8 +997,15 @@ static int run_server(struct conf **confs, const char *conffile)
 		if(init_listen_sockets(addresses, mainas,
 			ASFD_FD_SERVER_LISTEN_MAIN, network_allow, "server")
 		  || init_listen_sockets(addresses_status, mainas,
-			ASFD_FD_SERVER_LISTEN_STATUS, network_allow_status, "server status"))
+			ASFD_FD_SERVER_LISTEN_STATUS, network_allow_status, "server status")
+		  || init_listen_sockets(addresses_prometheus_exporter, mainas,
+			ASFD_FD_SERVER_LISTEN_PROMETHEUS_EXPORTER, network_allow_status, "prometheus exporter"))
 				goto end;
+	}
+
+	if (prometheus_exporter_initialise(confs)) {
+		logp("error initialising prometheus_exporter\n");
+		goto end;
 	}
 
 	while(!hupreload)
@@ -1007,6 +1036,10 @@ static int run_server(struct conf **confs, const char *conffile)
 						}
 						continue;
 					}
+
+					if(asfd->streamtype==ASFD_STREAM_HTTP
+					  && asfd->rbuf->buf)
+						run_prometheus_exporter(asfd);
 				}
 				break;
 			default:
@@ -1021,6 +1054,9 @@ static int run_server(struct conf **confs, const char *conffile)
 						asfd=asfd->next;
 						continue;
 					}
+
+                    prometheus_exporter_notify_removed(asfd);
+
 					mainas->asfd_remove(mainas, asfd);
 					logp("%s: disconnected fd %d\n",
 						asfd->desc, asfd->fd);
@@ -1044,6 +1080,9 @@ static int run_server(struct conf **confs, const char *conffile)
 //printf("got info from child: %s\n", asfd->rbuf->buf);
 			if(extract_client_name(asfd))
 				goto end;
+
+			if(addresses_prometheus_exporter)
+				prometheus_exporter_notify(asfd);
 
 			if(max_parallel_backups)
 				extract_client_cntr_status(asfd);
@@ -1101,6 +1140,7 @@ static int run_server(struct conf **confs, const char *conffile)
 
 	ret=0;
 end:
+	prometheus_exporter_free();
 	async_asfd_free_all(&mainas);
 	if(ctx) ssl_destroy_ctx(ctx);
 	return ret;

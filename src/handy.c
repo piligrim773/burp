@@ -17,6 +17,7 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <netinet/tcp.h>
 
 #ifdef HAVE_WIN32
 #include <winsock2.h>
@@ -250,6 +251,19 @@ int set_peer_env_vars(struct sockaddr_storage *addr)
 		return -1;
 	}
 #endif
+	return 0;
+}
+
+int set_tcp_defer_accept(int fd, int value)
+{
+	int tcp_defer_accept=value;
+	if(setsockopt(fd, SOL_SOCKET, TCP_DEFER_ACCEPT,
+		(char *)&tcp_defer_accept, sizeof(tcp_defer_accept)))
+	{
+		logp("setsockopt tcp_defer_accept=%d failed: %s\n",
+			value, strerror(errno));
+		return -1;
+	}
 	return 0;
 }
 
